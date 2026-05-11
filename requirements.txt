@@ -1,0 +1,6 @@
+motor>=3.0
+beanie>=1.0
+httpx
+beautifulsoup4
+lxml
+python-dotenv
