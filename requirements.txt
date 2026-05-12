@@ -3,4 +3,6 @@ beanie>=1.0
 httpx
 beautifulsoup4
 lxml
+selenium
+dateparser
 python-dotenv
