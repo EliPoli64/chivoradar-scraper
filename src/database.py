@@ -1,23 +1,24 @@
 import os
-
 from beanie import init_beanie
-from motor.motor_asyncio import AsyncIOMotorClient
-
+from pymongo import AsyncMongoClient
 from src.models import Evento, TierPrecio, Venue
+from dotenv import load_dotenv
 
-connString = os.getenv("CONN_STRING", "mongodb://localhost:27017/loudmap")
+load_dotenv()
+connString = os.getenv("CONN_STRING", "mongodb://localhost:27017")
 
 _connected = False
-
 
 async def connectDb():
     global _connected
     if _connected:
         return
     try:
-        client = AsyncIOMotorClient(connString)
+        client = AsyncMongoClient(connString)
+        db = client["chivoradar"]
+        print(db.name)
         await init_beanie(
-            database=client.get_default_database(),
+            database=db,
             document_models=[Evento, TierPrecio, Venue],
         )
         _connected = True

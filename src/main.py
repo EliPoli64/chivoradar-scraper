@@ -1,16 +1,18 @@
 import asyncio
+from src.database import connectDb
 from src.parsers.eTicket import fetchEticket
+from src.parsers.specialTicket import fetchSpecialTicket
 
 
 async def getAll():
-    # specialTicket = fetchSpecialTicket()  # TODO
+    specialTicket = await fetchSpecialTicket()
     eticket = await fetchEticket()
     # starTicket = fetchStarTicket()        # TODO
-    return {"message": "Success", "data": eticket}
+    return {"message": "Success", "data": eticket + specialTicket}
 
 
 async def main():
-    # await connect_db()
+    await connectDb()
     result = await getAll()
     # print(result)
 

@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional
 from beanie import Document
 from bson import ObjectId
+from pydantic import ConfigDict
 
 
 class Venue(Document):
@@ -13,6 +14,8 @@ class Venue(Document):
 
     class Settings:
         name = "venues"
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class Evento(Document):
@@ -26,6 +29,8 @@ class Evento(Document):
 
     class Settings:
         name = "eventos"
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
 class TierPrecio(Document):
@@ -35,3 +40,5 @@ class TierPrecio(Document):
 
     class Settings:
         name = "tiersPrecio"
+    
+    model_config = ConfigDict(arbitrary_types_allowed=True)
