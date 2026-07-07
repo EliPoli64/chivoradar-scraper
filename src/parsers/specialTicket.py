@@ -141,11 +141,6 @@ async def extraerEventoSpecialTicket(links: dict[str, list[str]]) -> tuple[list[
                 
                 print(f"  Title: {titulo}")
 
-                existingEvent = await Evento.find_one(Evento.link == link)
-                if existingEvent:
-                    print(f"  Event already exists (ID: {existingEvent.id}), skipping...")
-                    continue
-
                 venueNombre = ""
                 venueDireccion = ""
                 
@@ -272,19 +267,32 @@ async def extraerEventoSpecialTicket(links: dict[str, list[str]]) -> tuple[list[
                         if descripcion:
                             break
 
-                evento = Evento(
-                    titulo=titulo,
-                    categoria=categoria,
-                    urlImagen=urlImagen,
-                    ubicacion=venue.id if venue else None,
-                    fechaHora=eventDate,
-                    descripcion=descripcion if descripcion else None,
-                    link=link,
-                )
-                
-                await evento.insert()
-                eventosGuardados.append(evento)
-                print(f"  Event saved to DB (ID: {evento.id})")
+                existingEvent = await Evento.find_one(Evento.link == link)
+                if existingEvent:
+                    evento = existingEvent
+                    evento.titulo = titulo
+                    evento.categoria = categoria
+                    evento.urlImagen = urlImagen
+                    evento.ubicacion = venue.id if venue else None
+                    evento.fechaHora = eventDate
+                    evento.descripcion = descripcion if descripcion else None
+                    await evento.save()
+                    await TierPrecio.find(TierPrecio.evento == evento.id).delete()
+                    eventosGuardados.append(evento)
+                    print(f"  Event updated (ID: {evento.id})")
+                else:
+                    evento = Evento(
+                        titulo=titulo,
+                        categoria=categoria,
+                        urlImagen=urlImagen,
+                        ubicacion=venue.id if venue else None,
+                        fechaHora=eventDate,
+                        descripcion=descripcion if descripcion else None,
+                        link=link,
+                    )
+                    await evento.insert()
+                    eventosGuardados.append(evento)
+                    print(f"  Event saved to DB (ID: {evento.id})")
 
                 tiersPrecio = []
                 

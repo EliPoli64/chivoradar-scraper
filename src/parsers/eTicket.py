@@ -156,11 +156,6 @@ async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento
                 
                 print(f"  Title: {titulo}")
 
-                existingEvent = await Evento.find_one(Evento.link == link)
-                if existingEvent:
-                    print(f"  Event already exists (ID: {existingEvent.id}), skipping...")
-                    continue
-
                 fechaEvento = soup.select_one(".font16.boldear600.borde_artista")
                 eventDate = None
                 if fechaEvento:
@@ -214,19 +209,32 @@ async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento
                         if descripcion:
                             break
 
-                evento = Evento(
-                    titulo=titulo,
-                    categoria=categoria,
-                    urlImagen=urlImagen,
-                    ubicacion=venue.id if venue else None,
-                    fechaHora=eventDate,
-                    descripcion=descripcion if descripcion else None,
-                    link=link,
-                )
-                
-                await evento.insert()
-                eventosGuardados.append(evento)
-                print(f"  Event saved to DB (ID: {evento.id})")
+                existingEvent = await Evento.find_one(Evento.link == link)
+                if existingEvent:
+                    evento = existingEvent
+                    evento.titulo = titulo
+                    evento.categoria = categoria
+                    evento.urlImagen = urlImagen
+                    evento.ubicacion = venue.id if venue else None
+                    evento.fechaHora = eventDate
+                    evento.descripcion = descripcion if descripcion else None
+                    await evento.save()
+                    await TierPrecio.find(TierPrecio.evento == evento.id).delete()
+                    eventosGuardados.append(evento)
+                    print(f"  Event updated (ID: {evento.id})")
+                else:
+                    evento = Evento(
+                        titulo=titulo,
+                        categoria=categoria,
+                        urlImagen=urlImagen,
+                        ubicacion=venue.id if venue else None,
+                        fechaHora=eventDate,
+                        descripcion=descripcion if descripcion else None,
+                        link=link,
+                    )
+                    await evento.insert()
+                    eventosGuardados.append(evento)
+                    print(f"  Event saved to DB (ID: {evento.id})")
 
                 tiersPrecioText = [el.get_text(strip=True) for el in soup.select(".col.tipoBoleto") if el.get_text(strip=True) != 'Numerado']
                 
