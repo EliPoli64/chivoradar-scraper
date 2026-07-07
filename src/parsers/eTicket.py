@@ -176,20 +176,28 @@ async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento
                     eventDate = datetime.now()
 
                 urlImagen = None
-                imgSelectors = [
-                    "img[src*='evento']",
-                    "img[src*='event']",
-                    ".event-image img",
-                    "img"
-                ]
+                imgElement = soup.select_one("img[src*='imgeventos'], img[data-src*='imgeventos'], img[src*='imgEventos'], img[data-src*='imgEventos'], img[src*='cdn.eticket.cr/imagenes'], img[data-src*='cdn.eticket.cr/imagenes']")
+                if imgElement:
+                    urlImagen = imgElement.get("data-src") or imgElement.get("src")
                 
-                for selector in imgSelectors:
-                    imgElement = soup.select_one(selector)
-                    if imgElement and imgElement.get("src"):
-                        urlImagen = imgElement.get("src")
-                        if not urlImagen.startswith("http"):
-                            urlImagen = f"https://www.eticket.cr/{urlImagen}"
-                        break
+                if not urlImagen:
+                    imgSelectors = [
+                        "img[src*='evento']",
+                        "img[data-src*='evento']",
+                        "img[src*='event']",
+                        "img[data-src*='event']",
+                        ".event-image img",
+                        "img"
+                    ]
+                    for selector in imgSelectors:
+                        imgElement = soup.select_one(selector)
+                        if imgElement:
+                            urlImagen = imgElement.get("data-src") or imgElement.get("src")
+                            if urlImagen:
+                                break
+                
+                if urlImagen and not urlImagen.startswith("http"):
+                    urlImagen = f"https://www.eticket.cr/{urlImagen}"
 
                 descripcion = ""
                 descSelectors = [
