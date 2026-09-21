@@ -27,7 +27,7 @@ async def searchAndUpsertVenue(
     print(f"Getting coordinates via geocoding...")
     
     # intentar obtener coordenadas
-    lat, lng = await checkGeocoding(nombre + " " + direccion if direccion else "")
+    lat, lng = await checkGeocoding(nombre, direccion)
     
     if lat != 0.0 or lng != 0.0:
         print(f"Got coordinates: ({lat}, {lng})")
