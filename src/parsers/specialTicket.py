@@ -50,7 +50,7 @@ def filtrarEventos(eventos: list[dict]) -> list[dict]:
         categoria = (evento.get("eventCategoryName") or "").strip().lower()
         if categoria in CATEGORIAS_EXCLUIDAS:
             continue
-        if evento.get("noSchedule") == 1 or evento.get("hidden") == 1:
+        if evento.get("hidden") == 1:
             continue
         if not evento.get("startDateTime"):
             continue
@@ -217,6 +217,7 @@ async def extraerEventoSpecialTicket(eventosApi: list[dict]) -> tuple[list[Event
                 tier = TierPrecio(
                     nombre=tierName,
                     precio=tierPrice,
+                    moneda="CRC",
                     evento=evento.id
                 )
                 await tier.insert()

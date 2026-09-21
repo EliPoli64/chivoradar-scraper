@@ -36,6 +36,7 @@ class Evento(Document):
 class TierPrecio(Document):
     nombre: str
     precio: float
+    moneda: str = "CRC"
     evento: ObjectId
 
     class Settings:

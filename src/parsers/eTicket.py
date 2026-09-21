@@ -263,6 +263,7 @@ async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento
                             tier = TierPrecio(
                                 nombre=tierName,
                                 precio=tierPrice,
+                                moneda="CRC",
                                 evento=evento.id
                             )
                             await tier.insert()
