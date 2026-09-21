@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 connString = os.getenv("CONN_STRING", "mongodb://localhost:27017")
+dbName = os.getenv("DB_NAME", "chivoradar")
 
 _connected = False
 
@@ -15,7 +16,7 @@ async def connectDb():
         return
     try:
         client = AsyncMongoClient(connString)
-        db = client["chivoradar"]
+        db = client[dbName]
         print(db.name)
         await init_beanie(
             database=db,
