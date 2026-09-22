@@ -5,8 +5,8 @@ from src.models import Evento, TierPrecio, Venue
 from dotenv import load_dotenv
 
 load_dotenv()
-connString = os.getenv("CONN_STRING", "mongodb://localhost:27017")
-dbName = os.getenv("DB_NAME", "chivoradar")
+connString = os.getenv("CONN_STRING") or "mongodb://localhost:27017"
+dbName = os.getenv("DB_NAME") or "chivoradar"
 
 _connected = False
 

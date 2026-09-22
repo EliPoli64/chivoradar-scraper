@@ -79,5 +79,5 @@ async def createVenue(
 
 async def encontrarVenue(nombre: str) -> Optional[Venue]:
     pattern = re.compile(f"^{re.escape(nombre)}$", re.IGNORECASE)
-    venue = await Venue.find_one(Venue.nombre == pattern)
+    venue = await Venue.find_one({"nombre": pattern})
     return venue

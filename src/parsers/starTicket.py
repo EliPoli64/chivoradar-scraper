@@ -133,7 +133,7 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict]) -> tuple[list[Event
         urlImagen = imagen[0] if imagen else None
         descripcion = (ev.get("description") or "").strip() or None
 
-        existingEvent = await Evento.find_one(Evento.link == link)
+        existingEvent = await Evento.find_one({"link": link})
         if existingEvent:
             evento = existingEvent
             evento.titulo = titulo
@@ -143,7 +143,7 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict]) -> tuple[list[Event
             evento.fechaHora = eventDate
             evento.descripcion = descripcion
             await evento.save()
-            await TierPrecio.find(TierPrecio.evento == evento.id).delete()
+            await TierPrecio.find({"evento": evento.id}).delete()
             eventosGuardados.append(evento)
             print(f"  Event updated (ID: {evento.id})")
         else:
