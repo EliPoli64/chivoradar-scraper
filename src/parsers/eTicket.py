@@ -5,6 +5,7 @@ from selenium.webdriver.chrome.options import Options
 from bs4 import BeautifulSoup
 import httpx
 from src.parsers.geocoding import checkGeocoding
+from src.parsers.categorias import esCategoriaUtil, inferirCategoria
 from src.venues import searchAndUpsertVenue
 from src.models import Evento, TierPrecio, Venue
 from src.database import connectDb
@@ -208,6 +209,9 @@ async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento
                         descripcion = descElement.get_text(strip=True)
                         if descripcion:
                             break
+
+                if not esCategoriaUtil(categoria):
+                    categoria = inferirCategoria({"name": titulo, "description": descripcion})
 
                 existingEvent = await Evento.find_one({"link": link})
                 if existingEvent:

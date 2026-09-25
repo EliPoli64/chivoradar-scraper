@@ -14,6 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from src.database import connectDb
 from src.models import Evento, TierPrecio, Venue
+from src.parsers.categorias import esCategoriaUtil, inferirCategoria
 from src.venues import searchAndUpsertVenue
 
 load_dotenv()
@@ -150,6 +151,8 @@ async def extraerEventoSpecialTicket(eventosApi: list[dict]) -> tuple[list[Event
         link = f"{SITE_BASE}/event-details/{ev['id']}"
         titulo = (ev.get("eventName") or ev.get("performerName") or "").strip()
         categoria = (ev.get("eventCategoryName") or "Sin Categoría").split(";")[0].strip()
+        if not esCategoriaUtil(categoria):
+            categoria = inferirCategoria(ev)
 
         print(f"\n[{idx}/{len(eventosApi)}] Processing: {titulo} ({link})")
 

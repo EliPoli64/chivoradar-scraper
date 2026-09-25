@@ -13,6 +13,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from src.database import connectDb
 from src.models import Evento, TierPrecio, Venue
+from src.parsers.categorias import inferirCategoria
 from src.venues import searchAndUpsertVenue
 
 load_dotenv()
@@ -137,7 +138,7 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict]) -> tuple[list[Event
         if existingEvent:
             evento = existingEvent
             evento.titulo = titulo
-            evento.categoria = "Sin Categoría"
+            evento.categoria = inferirCategoria(ev)
             evento.urlImagen = urlImagen
             evento.ubicacion = venue.id if venue else None
             evento.fechaHora = eventDate
@@ -149,7 +150,7 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict]) -> tuple[list[Event
         else:
             evento = Evento(
                 titulo=titulo,
-                categoria="Sin Categoría",
+                categoria=inferirCategoria(ev),
                 urlImagen=urlImagen,
                 ubicacion=venue.id if venue else None,
                 fechaHora=eventDate,
