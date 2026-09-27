@@ -1,8 +1,9 @@
 import json
+import re
 from datetime import datetime
 from typing import Optional, Tuple
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from bson import ObjectId
 from dotenv import load_dotenv
 from selenium import webdriver
@@ -50,6 +51,80 @@ def esperarListadoRenderizado(driver, timeout=45) -> BeautifulSoup:
     except TimeoutException:
         print("  Timed out waiting for JSON-LD scripts")
     return BeautifulSoup(driver.page_source, "lxml")
+
+
+def esperarDetalleRenderizado(driver, timeout=30) -> BeautifulSoup:
+    WebDriverWait(driver, timeout).until(
+        lambda d: d.execute_script("return document.readyState") == "complete"
+    )
+    try:
+        WebDriverWait(driver, timeout).until(
+            lambda d: len(d.find_elements(By.CSS_SELECTOR, "#tickets-selector")) > 0
+        )
+    except TimeoutException:
+        print("  Timed out waiting for ticket selector to render")
+    return BeautifulSoup(driver.page_source, "lxml")
+
+
+def extraerPrecios(precioTexto: str) -> float:
+    precioLimpio = re.sub(r'[^\d.,]', '', precioTexto)
+    precioLimpio = precioLimpio.replace(',', '.')
+
+    if '.' in precioLimpio and len(precioLimpio.split('.')[-1]) == 3:
+        precioLimpio = precioLimpio.replace('.', '')
+
+    try:
+        return float(precioLimpio)
+    except ValueError:
+        return 0.0
+
+
+def extraerDescripcion(soup: BeautifulSoup) -> str | None:
+    container = soup.select_one(".markdown-description")
+    if not container:
+        return None
+
+    bloques = [el for el in container.children if isinstance(el, Tag)]
+    if not bloques:
+        texto = " ".join(container.get_text(" ", strip=True).split())
+        return texto or None
+
+    partes = []
+    for bloque in bloques:
+        texto = " ".join(bloque.get_text(" ", strip=True).split())
+        if texto:
+            partes.append(texto)
+
+    texto = "\n".join(partes)
+    return texto or None
+
+
+def esMonedaColones(precioTexto: str) -> bool:
+    return "₡" in precioTexto or "CRC" in precioTexto.upper()
+
+
+def extraerTiers(soup: BeautifulSoup) -> list[tuple[str, float, str]]:
+    tiers: dict[str, tuple[float, str]] = {}
+
+    selector = soup.select_one("#tickets-selector")
+    if not selector:
+        return []
+
+    for row in selector.select('div[id^="ticket_"]'):
+        nombreEl = row.select_one("p")
+        precioEl = row.select_one("span.whitespace-nowrap")
+        if not nombreEl or not precioEl:
+            continue
+
+        nombre = nombreEl.get_text(strip=True)
+        precio = extraerPrecios(precioEl.get_text(strip=True))
+        if not nombre or precio <= 0:
+            continue
+
+        moneda = "CRC" if esMonedaColones(precioEl.get_text(strip=True)) else "USD"
+        tiers.setdefault(nombre, (precio, moneda))
+
+    return [(nombre, precio, moneda) for nombre, (precio, moneda) in tiers.items()]
 
 
 def extraerEventosJsonLd(soup: BeautifulSoup) -> list[dict]:
@@ -101,7 +176,7 @@ async def verificarUbicacionEnDB(venueId: Optional[ObjectId]) -> Tuple[bool, Opt
     return hasLocation, venue
 
 
-async def extraerEventoStarTicket(eventosJsonLd: list[dict]) -> tuple[list[Evento], list[TierPrecio]]:
+async def extraerEventoStarTicket(eventosJsonLd: list[dict], driver=None) -> tuple[list[Evento], list[TierPrecio]]:
     eventosGuardados: list[Evento] = []
     tiersGuardados: list[TierPrecio] = []
 
@@ -138,6 +213,20 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict]) -> tuple[list[Event
         urlImagen = imagen[0] if imagen else None
         descripcion = (ev.get("description") or "").strip() or None
 
+        soupDetalle = None
+        if driver:
+            try:
+                driver.get(link)
+                soupDetalle = esperarDetalleRenderizado(driver, timeout=30)
+            except Exception as e:
+                print(f"  Error loading detail page: {str(e)}")
+
+        if soupDetalle:
+            descripcion = extraerDescripcion(soupDetalle) or descripcion
+            foundTiers = extraerTiers(soupDetalle)
+        else:
+            foundTiers = []
+
         existingEvent = await Evento.find_one({"link": link})
         if existingEvent:
             evento = existingEvent
@@ -165,24 +254,37 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict]) -> tuple[list[Event
             eventosGuardados.append(evento)
             print(f"  Event saved to DB (ID: {evento.id})")
 
-        offers = ev.get("offers") or []
-        if offers:
-            print(f"  Price tiers found: {len(offers)}")
-            for offer in offers:
-                tierPrecio = offer.get("price")
-                if tierPrecio is None:
-                    continue
+        if foundTiers:
+            print(f"  Price tiers found: {len(foundTiers)}")
+            for tierNombre, tierPrecio, moneda in foundTiers:
                 tier = TierPrecio(
-                    nombre=(offer.get("name") or "General").strip(),
-                    precio=float(tierPrecio),
-                    moneda=offer.get("priceCurrency") or "USD",
+                    nombre=tierNombre,
+                    precio=tierPrecio,
+                    moneda=moneda,
                     evento=evento.id,
                 )
                 await tier.insert()
                 tiersGuardados.append(tier)
                 print(f"    - {tier.nombre}: {tier.precio:,.2f} {tier.moneda}")
         else:
-            print("  No price tiers found")
+            offers = ev.get("offers") or []
+            if offers:
+                print(f"  Price tiers found (JSON-LD fallback): {len(offers)}")
+                for offer in offers:
+                    tierPrecio = offer.get("price")
+                    if tierPrecio is None:
+                        continue
+                    tier = TierPrecio(
+                        nombre=(offer.get("name") or "General").strip(),
+                        precio=float(tierPrecio),
+                        moneda=offer.get("priceCurrency") or "USD",
+                        evento=evento.id,
+                    )
+                    await tier.insert()
+                    tiersGuardados.append(tier)
+                    print(f"    - {tier.nombre}: {tier.precio:,.2f} {tier.moneda}")
+            else:
+                print("  No price tiers found")
 
         if venue:
             hasLocation, venueObj = await verificarUbicacionEnDB(venue.id)
@@ -207,14 +309,14 @@ async def fetchStarTicket():
         print(f"Loading {SITE_URL} ...")
         driver.get(SITE_URL)
         soup = esperarListadoRenderizado(driver, timeout=45)
+
+        eventosJsonLd = filtrarEventos(extraerEventosJsonLd(soup))
+        print(f"Events after filtering: {len(eventosJsonLd)}")
+
+        print("\nStarting extraction and database insertion...")
+        eventos, tiers = await extraerEventoStarTicket(eventosJsonLd, driver=driver)
     finally:
         driver.quit()
-
-    eventosJsonLd = filtrarEventos(extraerEventosJsonLd(soup))
-    print(f"Events after filtering: {len(eventosJsonLd)}")
-
-    print("\nStarting extraction and database insertion...")
-    eventos, tiers = await extraerEventoStarTicket(eventosJsonLd)
 
     print(f"Events saved to DB: {len(eventos)}")
     print(f"Price tiers saved to DB: {len(tiers)}")

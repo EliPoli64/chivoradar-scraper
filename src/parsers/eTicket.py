@@ -2,7 +2,7 @@ import dateparser
 from selenium import webdriver
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.options import Options
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 import httpx
 from src.parsers.geocoding import checkGeocoding
 from src.parsers.categorias import esCategoriaUtil, esEventoExcluido, inferirCategoria
@@ -95,6 +95,19 @@ async def verificarUbicacionEnDB(venueId: Optional[ObjectId]) -> Tuple[bool, Opt
     hasLocation = venue.ubicacion is not None and venue.ubicacion.get("coordinates")
     
     return hasLocation, venue
+
+def extraerTextoDescripcion(descElement) -> str:
+    bloques = [el for el in descElement.children if isinstance(el, Tag)]
+    if not bloques:
+        return " ".join(descElement.get_text(" ", strip=True).split())
+
+    partes = []
+    for bloque in bloques:
+        texto = " ".join(bloque.get_text(" ", strip=True).split())
+        if texto:
+            partes.append(texto)
+    return "\n".join(partes)
+
 
 async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento], list[TierPrecio]]:
     eventosGuardados: list[Evento] = []
@@ -206,7 +219,7 @@ async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento
                 for selector in descSelectors:
                     descElement = soup.select_one(selector)
                     if descElement:
-                        descripcion = descElement.get_text(strip=True)
+                        descripcion = extraerTextoDescripcion(descElement)
                         if descripcion:
                             break
 
