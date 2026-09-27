@@ -18,6 +18,8 @@ CATEGORIAS: list[tuple[str, tuple[str, ...]]] = [
     ("Festivales", ("festival", "feria")),
 ]
 
+EXCLUIDAS: tuple[str, ...] = ("transporte", "transportes", "parqueo", "parqueos", "estacionamiento", "ferry")
+
 
 def normalizar(texto: str) -> str:
     texto = texto.lower().translate(_ACCENTOS)
@@ -48,7 +50,7 @@ def _extraerTexto(valor: Any) -> list[str]:
 
 def construirSeñal(datos: dict) -> str:
     partes: list[str] = []
-    for clave in ("name", "titulo", "title", "eventName", "description", "descripcion", "eventDetail", "offers", "organizer", "performer"):
+    for clave in ("name", "titulo", "title", "eventName", "description", "descripcion", "eventDetail", "categoria", "category", "eventCategoryName", "offers", "organizer", "performer"):
         if clave in datos:
             partes.extend(_extraerTexto(datos[clave]))
     return " ".join(partes)
@@ -66,3 +68,8 @@ def inferirCategoria(datos: dict) -> str:
 
 def esCategoriaUtil(categoria: str | None) -> bool:
     return bool(categoria and categoria.strip() and categoria.strip() != SIN_CATEGORIA)
+
+
+def esEventoExcluido(datos: dict) -> bool:
+    señal = normalizar(construirSeñal(datos))
+    return any(_contiene(señal, clave) for clave in EXCLUIDAS)

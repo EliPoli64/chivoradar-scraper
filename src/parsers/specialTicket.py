@@ -14,7 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from src.database import connectDb
 from src.models import Evento, TierPrecio, Venue
-from src.parsers.categorias import esCategoriaUtil, inferirCategoria
+from src.parsers.categorias import esCategoriaUtil, esEventoExcluido, inferirCategoria
 from src.venues import searchAndUpsertVenue
 
 load_dotenv()
@@ -50,6 +50,8 @@ def filtrarEventos(eventos: list[dict]) -> list[dict]:
     for evento in eventos:
         categoria = (evento.get("eventCategoryName") or "").strip().lower()
         if categoria in CATEGORIAS_EXCLUIDAS:
+            continue
+        if esEventoExcluido(evento):
             continue
         if evento.get("hidden") == 1:
             continue

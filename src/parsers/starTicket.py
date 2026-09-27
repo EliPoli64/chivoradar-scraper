@@ -13,7 +13,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from src.database import connectDb
 from src.models import Evento, TierPrecio, Venue
-from src.parsers.categorias import inferirCategoria
+from src.parsers.categorias import esEventoExcluido, inferirCategoria
 from src.venues import searchAndUpsertVenue
 
 load_dotenv()
@@ -115,6 +115,10 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict]) -> tuple[list[Event
 
         if not titulo or not link:
             print("  No title/link found, skipping...")
+            continue
+
+        if esEventoExcluido(ev):
+            print("  Event matched exclusion (transporte/parqueo), skipping...")
             continue
 
         try:
