@@ -3,14 +3,10 @@ import re
 from datetime import datetime
 from typing import Optional, Tuple
 
-from bs4 import BeautifulSoup, Tag
+import httpx
+from bs4 import BeautifulSoup
 from bson import ObjectId
 from dotenv import load_dotenv
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 
 from src.database import connectDb
 from src.models import Evento, TierPrecio, Venue
@@ -19,112 +15,17 @@ from src.venues import searchAndUpsertVenue
 
 load_dotenv()
 
+# starticket.cr is a server-rendered site: the catalog comes from JSON-LD embedded in
+# the HTML (no browser needed), and the live ticket tiers come from a public JSON API
+# used by the in-page <ticket-selector> component. Previously the scraper drove a
+# headless Chrome to render both, which kept timing out (heavy client JS + bot layers).
 SITE_URL = "https://www.starticket.cr/es"
+TICKETS_ENDPOINT = "https://secure.starticket.cr/checkout/{event_id}/tickets"
 PAISES_JSONLD = {"costa rica", "cr"}
-
-
-def getHeadlessDriver():
-    chromeOptions = Options()
-    chromeOptions.add_argument("--headless=new")
-    chromeOptions.add_argument("--no-sandbox")
-    chromeOptions.add_argument("--disable-dev-shm-usage")
-    chromeOptions.add_argument("--disable-gpu")
-    chromeOptions.add_argument("--window-size=1920,1080")
-    chromeOptions.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-    chromeOptions.add_argument("--disable-blink-features=AutomationControlled")
-    chromeOptions.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chromeOptions.add_experimental_option('useAutomationExtension', False)
-
-    driver = webdriver.Chrome(options=chromeOptions)
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    return driver
-
-
-def esperarListadoRenderizado(driver, timeout=45) -> BeautifulSoup:
-    WebDriverWait(driver, timeout).until(
-        lambda d: d.execute_script("return document.readyState") == "complete"
-    )
-    try:
-        WebDriverWait(driver, timeout).until(
-            lambda d: len(d.find_elements(By.XPATH, "//script[@type='application/ld+json']")) > 0
-        )
-    except TimeoutException:
-        print("  Timed out waiting for JSON-LD scripts")
-    return BeautifulSoup(driver.page_source, "lxml")
-
-
-def esperarDetalleRenderizado(driver, timeout=30) -> BeautifulSoup:
-    WebDriverWait(driver, timeout).until(
-        lambda d: d.execute_script("return document.readyState") == "complete"
-    )
-    try:
-        WebDriverWait(driver, timeout).until(
-            lambda d: len(d.find_elements(By.CSS_SELECTOR, "#tickets-selector")) > 0
-        )
-    except TimeoutException:
-        print("  Timed out waiting for ticket selector to render")
-    return BeautifulSoup(driver.page_source, "lxml")
-
-
-def extraerPrecios(precioTexto: str) -> float:
-    precioLimpio = re.sub(r'[^\d.,]', '', precioTexto)
-    precioLimpio = precioLimpio.replace(',', '.')
-
-    if '.' in precioLimpio and len(precioLimpio.split('.')[-1]) == 3:
-        precioLimpio = precioLimpio.replace('.', '')
-
-    try:
-        return float(precioLimpio)
-    except ValueError:
-        return 0.0
-
-
-def extraerDescripcion(soup: BeautifulSoup) -> str | None:
-    container = soup.select_one(".markdown-description")
-    if not container:
-        return None
-
-    bloques = [el for el in container.children if isinstance(el, Tag)]
-    if not bloques:
-        texto = " ".join(container.get_text(" ", strip=True).split())
-        return texto or None
-
-    partes = []
-    for bloque in bloques:
-        texto = " ".join(bloque.get_text(" ", strip=True).split())
-        if texto:
-            partes.append(texto)
-
-    texto = "\n".join(partes)
-    return texto or None
-
-
-def esMonedaColones(precioTexto: str) -> bool:
-    return "₡" in precioTexto or "CRC" in precioTexto.upper()
-
-
-def extraerTiers(soup: BeautifulSoup) -> list[tuple[str, float, str]]:
-    tiers: dict[str, tuple[float, str]] = {}
-
-    selector = soup.select_one("#tickets-selector")
-    if not selector:
-        return []
-
-    for row in selector.select('div[id^="ticket_"]'):
-        nombreEl = row.select_one("p")
-        precioEl = row.select_one("span.whitespace-nowrap")
-        if not nombreEl or not precioEl:
-            continue
-
-        nombre = nombreEl.get_text(strip=True)
-        precio = extraerPrecios(precioEl.get_text(strip=True))
-        if not nombre or precio <= 0:
-            continue
-
-        moneda = "CRC" if esMonedaColones(precioEl.get_text(strip=True)) else "USD"
-        tiers.setdefault(nombre, (precio, moneda))
-
-    return [(nombre, precio, moneda) for nombre, (precio, moneda) in tiers.items()]
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+    "Accept": "application/json",
+}
 
 
 def extraerEventosJsonLd(soup: BeautifulSoup) -> list[dict]:
@@ -163,6 +64,97 @@ def filtrarEventos(eventos: list[dict]) -> list[dict]:
     return [e for e in eventos if esEventoCostaRica(e)]
 
 
+def extraerIdEvento(url: str | None) -> Optional[str]:
+    m = re.search(r"/(\d+)/?$", url or "")
+    return m.group(1) if m else None
+
+
+def detectarMoneda(precioTexto: Optional[str], currencyFallback: Optional[str] = None) -> str:
+    texto = precioTexto or ""
+    if "₡" in texto or "CRC" in texto.upper():
+        return "CRC"
+    if "$" in texto or "USD" in texto.upper():
+        return "USD"
+    if currencyFallback in ("CRC", "USD"):
+        return currencyFallback
+    return "USD"
+
+
+def limpiarHtml(texto) -> Optional[str]:
+    if not texto:
+        return None
+    sinTags = re.sub(r"<[^>]+>", " ", texto)
+    limpio = " ".join(sinTags.split()).strip()
+    return limpio or None
+
+
+def monedaEventoJsonLd(evento: dict) -> Optional[str]:
+    """Infer an event-wide currency from its embedded JSON-LD offers (if consistent)."""
+    moneda = None
+    for offer in evento.get("offers") or []:
+        c = (offer.get("priceCurrency") or "").strip()
+        if not c:
+            continue
+        if moneda is None:
+            moneda = c
+        elif moneda != c:
+            return None
+    return moneda
+
+
+def extraerTiersApi(client: httpx.Client, evento: dict) -> list[dict]:
+    """Live ticket tiers from the same endpoint the in-page <ticket-selector> uses."""
+    eventId = extraerIdEvento(evento.get("url"))
+    if not eventId:
+        return []
+    resp = client.get(
+        TICKETS_ENDPOINT.format(event_id=eventId),
+        headers={"Referer": evento.get("url") or SITE_URL},
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    currencyFallback = monedaEventoJsonLd(evento)
+
+    tiers = []
+    for tk in data.get("tickets") or []:
+        try:
+            precio = float(tk.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if precio < 0:
+            continue
+        tiers.append({
+            "nombre": (tk.get("name") or "").strip() or "General",
+            "precio": precio,
+            "precioBase": precio,
+            "cargo": None,
+            "moneda": detectarMoneda(tk.get("price_text"), currencyFallback),
+            "zona": limpiarHtml(tk.get("description")),
+        })
+    return tiers
+
+
+def extraerTiersJsonLd(evento: dict) -> list[dict]:
+    """Fallback tiers from the event's embedded JSON-LD offers."""
+    tiers = []
+    for offer in evento.get("offers") or []:
+        try:
+            precio = float(offer.get("price"))
+        except (TypeError, ValueError):
+            continue
+        if precio < 0:
+            continue
+        tiers.append({
+            "nombre": (offer.get("name") or "General").strip(),
+            "precio": precio,
+            "precioBase": None,
+            "cargo": None,
+            "moneda": (offer.get("priceCurrency") or "USD"),
+            "zona": (offer.get("description") or "").strip() or None,
+        })
+    return tiers
+
+
 async def verificarUbicacionEnDB(venueId: Optional[ObjectId]) -> Tuple[bool, Optional[Venue]]:
     if not venueId:
         return False, None
@@ -176,7 +168,7 @@ async def verificarUbicacionEnDB(venueId: Optional[ObjectId]) -> Tuple[bool, Opt
     return hasLocation, venue
 
 
-async def extraerEventoStarTicket(eventosJsonLd: list[dict], driver=None) -> tuple[list[Evento], list[TierPrecio]]:
+async def extraerEventoStarTicket(eventosJsonLd: list[dict], client: httpx.Client) -> tuple[list[Evento], list[TierPrecio]]:
     eventosGuardados: list[Evento] = []
     tiersGuardados: list[TierPrecio] = []
 
@@ -213,19 +205,13 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict], driver=None) -> tup
         urlImagen = imagen[0] if imagen else None
         descripcion = (ev.get("description") or "").strip() or None
 
-        soupDetalle = None
-        if driver:
-            try:
-                driver.get(link)
-                soupDetalle = esperarDetalleRenderizado(driver, timeout=30)
-            except Exception as e:
-                print(f"  Error loading detail page: {str(e)}")
-
-        if soupDetalle:
-            descripcion = extraerDescripcion(soupDetalle) or descripcion
-            foundTiers = extraerTiers(soupDetalle)
-        else:
-            foundTiers = []
+        foundTiers = []
+        try:
+            foundTiers = extraerTiersApi(client, ev)
+        except Exception as e:
+            print(f"  Error loading tickets from API: {str(e)}")
+        if not foundTiers:
+            foundTiers = extraerTiersJsonLd(ev)
 
         existingEvent = await Evento.find_one({"link": link})
         if existingEvent:
@@ -256,35 +242,21 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict], driver=None) -> tup
 
         if foundTiers:
             print(f"  Price tiers found: {len(foundTiers)}")
-            for tierNombre, tierPrecio, moneda in foundTiers:
+            for tierInfo in foundTiers:
                 tier = TierPrecio(
-                    nombre=tierNombre,
-                    precio=tierPrecio,
-                    moneda=moneda,
+                    nombre=tierInfo["nombre"],
+                    precio=tierInfo["precio"],
+                    moneda=tierInfo["moneda"],
+                    zona=tierInfo["zona"],
+                    precioBase=tierInfo["precioBase"],
+                    cargo=tierInfo["cargo"],
                     evento=evento.id,
                 )
                 await tier.insert()
                 tiersGuardados.append(tier)
                 print(f"    - {tier.nombre}: {tier.precio:,.2f} {tier.moneda}")
         else:
-            offers = ev.get("offers") or []
-            if offers:
-                print(f"  Price tiers found (JSON-LD fallback): {len(offers)}")
-                for offer in offers:
-                    tierPrecio = offer.get("price")
-                    if tierPrecio is None:
-                        continue
-                    tier = TierPrecio(
-                        nombre=(offer.get("name") or "General").strip(),
-                        precio=float(tierPrecio),
-                        moneda=offer.get("priceCurrency") or "USD",
-                        evento=evento.id,
-                    )
-                    await tier.insert()
-                    tiersGuardados.append(tier)
-                    print(f"    - {tier.nombre}: {tier.precio:,.2f} {tier.moneda}")
-            else:
-                print("  No price tiers found")
+            print("  No price tiers found")
 
         if venue:
             hasLocation, venueObj = await verificarUbicacionEnDB(venue.id)
@@ -304,19 +276,21 @@ async def fetchStarTicket():
 
     print("Starting Star Ticket scraper...")
 
-    driver = getHeadlessDriver()
     try:
-        print(f"Loading {SITE_URL} ...")
-        driver.get(SITE_URL)
-        soup = esperarListadoRenderizado(driver, timeout=45)
+        with httpx.Client(timeout=30, headers=HEADERS, follow_redirects=True) as client:
+            print(f"Loading {SITE_URL} ...")
+            resp = client.get(SITE_URL)
+            resp.raise_for_status()
+            soup = BeautifulSoup(resp.text, "lxml")
 
-        eventosJsonLd = filtrarEventos(extraerEventosJsonLd(soup))
-        print(f"Events after filtering: {len(eventosJsonLd)}")
+            eventosJsonLd = filtrarEventos(extraerEventosJsonLd(soup))
+            print(f"Events after filtering: {len(eventosJsonLd)}")
 
-        print("\nStarting extraction and database insertion...")
-        eventos, tiers = await extraerEventoStarTicket(eventosJsonLd, driver=driver)
-    finally:
-        driver.quit()
+            print("\nStarting extraction and database insertion...")
+            eventos, tiers = await extraerEventoStarTicket(eventosJsonLd, client)
+    except Exception as e:
+        print(f"Error loading event list: {str(e)}")
+        return [], []
 
     print(f"Events saved to DB: {len(eventos)}")
     print(f"Price tiers saved to DB: {len(tiers)}")

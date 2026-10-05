@@ -12,6 +12,7 @@ from src.database import connectDb
 from dotenv import load_dotenv
 import os
 import re
+import json
 from bson import ObjectId
 from datetime import datetime
 from typing import Optional, Tuple
@@ -83,6 +84,100 @@ def extraerPrecios(precioTexto: str) -> float:
         return float(precioLimpio)
     except ValueError:
         return 0.0
+
+PADLOCK = "\U0001F512"
+
+def extraerPopover(popover: str) -> Tuple[Optional[float], Optional[float]]:
+    """Extract (precioBase, cargo) from the tier popover's data-bs-content."""
+    precioBase, cargo = None, None
+    m = re.search(r"Precio:\s*<b>(.*?)</b>", popover, re.S)
+    if m:
+        precioBase = extraerPrecios(m.group(1))
+    m = re.search(r"Cargos:\s*<b>(.*?)</b>", popover, re.S)
+    if m:
+        cargo = extraerPrecios(m.group(1))
+    return precioBase, cargo
+
+def extraerTiersDesdeDom(info: Tag) -> list[dict[str, Optional[float]]]:
+    """Parse the rendered #infoPrecios block: zones (rows w/ .tipoBoleto) x tiers (.nombreTipoBoleto).
+
+    Tiers that only render a padlock (need a promotion code) are skipped.
+    """
+    tiers = []
+    for row in info.find_all("div", class_="row"):
+        zonaEl = row.select_one(".tipoBoleto")
+        if not zonaEl:
+            continue
+        zona = zonaEl.get_text(strip=True)
+        for inner in row.select(".row.font14"):
+            nombreEl = inner.select_one(".nombreTipoBoleto")
+            if not nombreEl:
+                continue  # "Día del Evento" header row
+            precioEl = inner.select_one(".precioTipoBoleto strong")
+            if not precioEl:
+                continue
+            precioTexto = precioEl.get_text(strip=True)
+            if PADLOCK in precioTexto:
+                continue  # promo-gated tier, no public price
+            precio = extraerPrecios(precioTexto)
+            if precio <= 0:
+                continue
+            precioBase, cargo = None, None
+            popoverEl = inner.select_one(".precioTipoBoleto")
+            if popoverEl:
+                precioBase, cargo = extraerPopover(popoverEl.get("data-bs-content", ""))
+            tiers.append({
+                "zona": zona,
+                "nombre": nombreEl.get_text(strip=True),
+                "precio": precio,
+                "precioBase": precioBase,
+                "cargo": cargo,
+            })
+    return tiers
+
+def extraerTiersDesdeJsonLd(soup: BeautifulSoup) -> list[dict[str, Optional[float]]]:
+    """Fallback: parse the Event JSON-LD offers[] (zone=`name`, tier=`description`)."""
+    tiers = []
+    for script in soup.select("script[type='application/ld+json']"):
+        try:
+            data = json.loads(script.get_text())
+        except (json.JSONDecodeError, ValueError):
+            continue
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            if not isinstance(item, dict) or item.get("@type") != "Event":
+                continue
+            offers = item.get("offers")
+            if not isinstance(offers, list):
+                continue
+            for offer in offers:
+                if not isinstance(offer, dict):
+                    continue
+                try:
+                    precio = float(offer.get("price"))
+                except (TypeError, ValueError):
+                    continue
+                if precio <= 0:
+                    continue
+                tiers.append({
+                    "zona": offer.get("name", ""),
+                    "nombre": offer.get("description", ""),
+                    "precio": precio,
+                    "precioBase": None,
+                    "cargo": None,
+                })
+            if tiers:
+                return tiers
+    return tiers
+
+def extraerTiersEticket(soup: BeautifulSoup) -> list[dict[str, Optional[float]]]:
+    """Extract price tiers: rendered DOM #infoPrecios first, JSON-LD offers as fallback."""
+    info = soup.select_one("#infoPrecios")
+    if info:
+        tiers = extraerTiersDesdeDom(info)
+        if tiers:
+            return tiers
+    return extraerTiersDesdeJsonLd(soup)
 
 async def verificarUbicacionEnDB(venueId: Optional[ObjectId]) -> Tuple[bool, Optional[Venue]]:
     if not venueId:
@@ -257,39 +352,23 @@ async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento
                     eventosGuardados.append(evento)
                     print(f"  Event saved to DB (ID: {evento.id})")
 
-                tiersPrecioText = [el.get_text(strip=True) for el in soup.select(".col.tipoBoleto") if el.get_text(strip=True) != 'Numerado']
-                
-                foundTiers = []
-                for tierText in tiersPrecioText:
-                    match = re.search(r'([^:]+):?\s*[₡$]?([\d.,]+)', tierText)
-                    if match:
-                        tierName = match.group(1).strip()
-                        tierPrice = extraerPrecios(match.group(2))
-                        if tierPrice > 0:
-                            foundTiers.append((tierName, tierPrice))
-                    else:
-                        priceValue = extraerPrecios(tierText)
-                        if priceValue > 0:
-                            foundTiers.append(("General", priceValue))
-                
-                uniqueTiers = {}
-                for name, price in foundTiers:
-                    if name not in uniqueTiers:
-                        uniqueTiers[name] = price
-                
-                if uniqueTiers:
-                    print(f"  Price tiers found: {len(uniqueTiers)}")
-                    for tierName, tierPrice in uniqueTiers.items():
-                        if tierPrice > 0:
-                            tier = TierPrecio(
-                                nombre=tierName,
-                                precio=tierPrice,
-                                moneda="CRC",
-                                evento=evento.id
-                            )
-                            await tier.insert()
-                            tiersGuardados.append(tier)
-                            print(f"    - {tierName}: ₡{tierPrice:,.2f}")
+                foundTiers = extraerTiersEticket(soup)
+
+                if foundTiers:
+                    print(f"  Price tiers found: {len(foundTiers)}")
+                    for tierInfo in foundTiers:
+                        tier = TierPrecio(
+                            nombre=tierInfo["nombre"],
+                            precio=tierInfo["precio"],
+                            moneda="CRC",
+                            zona=tierInfo["zona"],
+                            precioBase=tierInfo["precioBase"],
+                            cargo=tierInfo["cargo"],
+                            evento=evento.id
+                        )
+                        await tier.insert()
+                        tiersGuardados.append(tier)
+                        print(f"    - {tierInfo['zona']} / {tierInfo['nombre']}: ₡{tierInfo['precio']:,.2f}")
                 else:
                     print(f"  No price tiers found")
                 

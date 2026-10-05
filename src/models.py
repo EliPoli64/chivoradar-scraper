@@ -37,6 +37,9 @@ class TierPrecio(Document):
     nombre: str
     precio: float
     moneda: str = "CRC"
+    zona: str | None = None
+    precioBase: float | None = None
+    cargo: float | None = None
     evento: ObjectId
 
     class Settings:

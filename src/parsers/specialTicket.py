@@ -1,16 +1,9 @@
-import re
 from datetime import datetime
 from typing import Optional, Tuple
 
 import httpx
-from bs4 import BeautifulSoup
 from bson import ObjectId
 from dotenv import load_dotenv
-from selenium import webdriver
-from selenium.common.exceptions import TimeoutException
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
 
 from src.database import connectDb
 from src.models import Evento, TierPrecio, Venue
@@ -22,7 +15,6 @@ load_dotenv()
 API_BASE = "https://stsapi.specialticket.net"
 SITE_BASE = "https://www.specialticket.net"
 CATEGORIAS_EXCLUIDAS = {"parqueos", "ferry coonatramar"}
-PRICE_RE = re.compile(r"^[₡$]\s?[\d.,]+$")
 
 
 async def fetchEventosApi() -> list[dict]:
@@ -61,73 +53,50 @@ def filtrarEventos(eventos: list[dict]) -> list[dict]:
     return filtrados
 
 
-def getHeadlessDriver():
-    chromeOptions = Options()
-    chromeOptions.add_argument("--headless=new")
-    chromeOptions.add_argument("--no-sandbox")
-    chromeOptions.add_argument("--disable-dev-shm-usage")
-    chromeOptions.add_argument("--disable-gpu")
-    chromeOptions.add_argument("--window-size=1920,1080")
-    chromeOptions.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36")
-    chromeOptions.add_argument("--disable-blink-features=AutomationControlled")
-    chromeOptions.add_experimental_option("excludeSwitches", ["enable-automation"])
-    chromeOptions.add_experimental_option('useAutomationExtension', False)
+def obtenerDetalleEvento(eventId: int) -> dict:
+    """Fetch the public event detail (same endpoint the site's ticket renderer uses).
 
-    driver = webdriver.Chrome(options=chromeOptions)
-    driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-    return driver
+    The event-details page is a heavy React SPA (crowdhandler queue, chatfuel, google,
+    metricool, fb pixel...) that frequently never finishes loading under headless Chrome,
+    which is why rendering the page in Selenium timed out. The ticket zones come from
+    this public JSON API instead, so we call it directly.
+    """
+    url = f"{API_BASE}/event/EventDetail?id={eventId}&withSeatZones=true"
+    resp = httpx.get(url, timeout=30)
+    resp.raise_for_status()
+    return resp.json()
 
 
-def esperarDetalleRenderizado(driver, timeout=30) -> BeautifulSoup:
-    WebDriverWait(driver, timeout).until(
-        lambda d: d.execute_script("return document.readyState") == "complete"
-    )
-    try:
-        WebDriverWait(driver, timeout).until(
-            lambda d: len(d.find_elements(By.TAG_NAME, "h5")) > 0
-        )
-    except TimeoutException:
-        print("  Timed out waiting for page sections to render")
-    return BeautifulSoup(driver.page_source, "lxml")
+def extraerTiersDeDetalle(detalle: dict) -> list[dict[str, Optional[float]]]:
+    """Map eventDetail seatZones into tier dicts: {zona, nombre, precio, precioBase, cargo, moneda}.
 
+    The site displays, per zone, the label `seatZoneDetail` with the minimum price
+    (a "+" suffix when the zone has several price tiers), so we keep that contract:
+    one tier per zone at the minimum amount.
+    """
+    eventList = detalle.get("eventList") or []
+    if not eventList:
+        return []
+    evento = eventList[0]
+    moneda = "CRC" if evento.get("currency") == 1 else "USD"
 
-def extraerPrecios(precioTexto: str) -> float:
-    precioLimpio = re.sub(r'[^\d.,]', '', precioTexto)
-    precioLimpio = precioLimpio.replace(',', '.')
-
-    if '.' in precioLimpio and len(precioLimpio.split('.')[-1]) == 3:
-        precioLimpio = precioLimpio.replace('.', '')
-
-    try:
-        return float(precioLimpio)
-    except ValueError:
-        return 0.0
-
-
-def extraerTiers(soup: BeautifulSoup) -> list[tuple[str, float]]:
-    tiers: dict[str, float] = {}
-
-    for h5 in soup.find_all("h5"):
-        if "zonas" not in h5.get_text(strip=True).lower():
+    tiers: list[dict[str, Optional[float]]] = []
+    for zona in evento.get("seatZones") or []:
+        prices = [p for p in (zona.get("prices") or []) if (p.get("amount") or 0) > 0]
+        if not prices:
             continue
-
-        section = h5.parent
-        if not section:
-            continue
-
-        paragraphs = section.find_all("p")
-        for i in range(len(paragraphs) - 1):
-            nombre = paragraphs[i].get_text(strip=True)
-            precioTexto = paragraphs[i + 1].get_text(strip=True)
-            if not nombre or PRICE_RE.match(nombre):
-                continue
-            if not PRICE_RE.match(precioTexto):
-                continue
-            precio = extraerPrecios(precioTexto)
-            if precio > 0 and nombre not in tiers:
-                tiers[nombre] = precio
-
-    return list(tiers.items())
+        seatZoneName = zona.get("seatZoneName") or ""
+        seatZoneDetail = zona.get("seatZoneDetail") or seatZoneName or "General"
+        precioMin = min(prices, key=lambda p: p["amount"])
+        tiers.append({
+            "zona": seatZoneName,
+            "nombre": seatZoneDetail,
+            "precio": precioMin["amount"],
+            "precioBase": precioMin["amount"],
+            "cargo": precioMin.get("serviceFee") or 0.0,
+            "moneda": moneda,
+        })
+    return tiers
 
 
 async def verificarUbicacionEnDB(venueId: Optional[ObjectId]) -> Tuple[bool, Optional[Venue]]:
@@ -178,16 +147,12 @@ async def extraerEventoSpecialTicket(eventosApi: list[dict]) -> tuple[list[Event
         descripcion = (ev.get("eventDetail") or "").strip() or None
         urlImagen = ev.get("imageName") or None
 
-        driver = getHeadlessDriver()
         try:
-            driver.get(link)
-            soup = esperarDetalleRenderizado(driver, timeout=30)
-            foundTiers = extraerTiers(soup)
+            detalle = obtenerDetalleEvento(ev["id"])
+            foundTiers = extraerTiersDeDetalle(detalle)
         except Exception as e:
-            print(f"  Error loading detail page: {str(e)}")
+            print(f"  Error loading event detail: {str(e)}")
             foundTiers = []
-        finally:
-            driver.quit()
 
         existingEvent = await Evento.find_one({"link": link})
         if existingEvent:
@@ -218,16 +183,19 @@ async def extraerEventoSpecialTicket(eventosApi: list[dict]) -> tuple[list[Event
 
         if foundTiers:
             print(f"  Price tiers found: {len(foundTiers)}")
-            for tierName, tierPrice in foundTiers:
+            for tierInfo in foundTiers:
                 tier = TierPrecio(
-                    nombre=tierName,
-                    precio=tierPrice,
-                    moneda="CRC",
+                    nombre=tierInfo["nombre"],
+                    precio=tierInfo["precio"],
+                    moneda=tierInfo["moneda"],
+                    zona=tierInfo["zona"],
+                    precioBase=tierInfo["precioBase"],
+                    cargo=tierInfo["cargo"],
                     evento=evento.id
                 )
                 await tier.insert()
                 tiersGuardados.append(tier)
-                print(f"    - {tierName}: ₡{tierPrice:,.2f}")
+                print(f"    - {tierInfo['zona']} / {tierInfo['nombre']}: {tierInfo['precio']:,.2f}")
         else:
             print("  No price tiers found")
 
