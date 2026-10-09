@@ -26,6 +26,7 @@ class Evento(Document):
     fechaHora: datetime
     descripcion: str | None = None
     link: str
+    createdAt: datetime | None = None
 
     class Settings:
         name = "eventos"

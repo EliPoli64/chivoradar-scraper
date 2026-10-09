@@ -7,6 +7,7 @@ import httpx
 from src.parsers.geocoding import checkGeocoding
 from src.parsers.categorias import esCategoriaUtil, esEventoExcluido, inferirCategoria
 from src.venues import searchAndUpsertVenue
+from src.events import upsertEvento
 from src.models import Evento, TierPrecio, Venue
 from src.database import connectDb
 from dotenv import load_dotenv
@@ -325,32 +326,18 @@ async def extraerEventoEticket(links: dict[str, list[str]]) -> tuple[list[Evento
                     print(f"  Event matched exclusion (transporte/parqueo), skipping...")
                     continue
 
-                existingEvent = await Evento.find_one({"link": link})
-                if existingEvent:
-                    evento = existingEvent
-                    evento.titulo = titulo
-                    evento.categoria = categoria
-                    evento.urlImagen = urlImagen
-                    evento.ubicacion = venue.id if venue else None
-                    evento.fechaHora = eventDate
-                    evento.descripcion = descripcion if descripcion else None
-                    await evento.save()
-                    await TierPrecio.find({"evento": evento.id}).delete()
-                    eventosGuardados.append(evento)
-                    print(f"  Event updated (ID: {evento.id})")
-                else:
-                    evento = Evento(
-                        titulo=titulo,
-                        categoria=categoria,
-                        urlImagen=urlImagen,
-                        ubicacion=venue.id if venue else None,
-                        fechaHora=eventDate,
-                        descripcion=descripcion if descripcion else None,
-                        link=link,
-                    )
-                    await evento.insert()
-                    eventosGuardados.append(evento)
-                    print(f"  Event saved to DB (ID: {evento.id})")
+                evento, created = await upsertEvento(
+                    titulo=titulo,
+                    categoria=categoria,
+                    urlImagen=urlImagen,
+                    ubicacion=venue.id if venue else None,
+                    fechaHora=eventDate,
+                    descripcion=descripcion if descripcion else None,
+                    link=link,
+                )
+                await TierPrecio.find({"evento": evento.id}).delete()
+                eventosGuardados.append(evento)
+                print(f"  Event {'saved to DB' if created else 'updated'} (ID: {evento.id})")
 
                 foundTiers = extraerTiersEticket(soup)
 

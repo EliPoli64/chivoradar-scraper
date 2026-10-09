@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from src.database import connectDb
 from src.models import Evento, TierPrecio, Venue
 from src.parsers.categorias import esEventoExcluido, inferirCategoria
+from src.events import upsertEvento
 from src.venues import searchAndUpsertVenue
 
 load_dotenv()
@@ -213,32 +214,18 @@ async def extraerEventoStarTicket(eventosJsonLd: list[dict], client: httpx.Clien
         if not foundTiers:
             foundTiers = extraerTiersJsonLd(ev)
 
-        existingEvent = await Evento.find_one({"link": link})
-        if existingEvent:
-            evento = existingEvent
-            evento.titulo = titulo
-            evento.categoria = inferirCategoria(ev)
-            evento.urlImagen = urlImagen
-            evento.ubicacion = venue.id if venue else None
-            evento.fechaHora = eventDate
-            evento.descripcion = descripcion
-            await evento.save()
-            await TierPrecio.find({"evento": evento.id}).delete()
-            eventosGuardados.append(evento)
-            print(f"  Event updated (ID: {evento.id})")
-        else:
-            evento = Evento(
-                titulo=titulo,
-                categoria=inferirCategoria(ev),
-                urlImagen=urlImagen,
-                ubicacion=venue.id if venue else None,
-                fechaHora=eventDate,
-                descripcion=descripcion,
-                link=link,
-            )
-            await evento.insert()
-            eventosGuardados.append(evento)
-            print(f"  Event saved to DB (ID: {evento.id})")
+        evento, created = await upsertEvento(
+            titulo=titulo,
+            categoria=inferirCategoria(ev),
+            urlImagen=urlImagen,
+            ubicacion=venue.id if venue else None,
+            fechaHora=eventDate,
+            descripcion=descripcion,
+            link=link,
+        )
+        await TierPrecio.find({"evento": evento.id}).delete()
+        eventosGuardados.append(evento)
+        print(f"  Event {'saved to DB' if created else 'updated'} (ID: {evento.id})")
 
         if foundTiers:
             print(f"  Price tiers found: {len(foundTiers)}")

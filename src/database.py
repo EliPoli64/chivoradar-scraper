@@ -22,6 +22,12 @@ async def connectDb():
             database=db,
             document_models=[Evento, TierPrecio, Venue],
         )
+        try:
+            eventosCol = Evento.get_pymongo_collection()
+            await eventosCol.create_index([("createdAt", -1)])
+            await eventosCol.create_index([("ubicacion", 1), ("createdAt", -1)])
+        except Exception as e:
+            print("No se pudieron crear los índices de eventos:", e)
         _connected = True
     except Exception as e:
         print("Error al conectar a la DB:", e)
